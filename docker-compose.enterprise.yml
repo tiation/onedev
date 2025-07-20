@@ -1,0 +1,162 @@
+version: '3.8'
+
+services:
+  onedev-server:
+    build:
+      context: .
+      dockerfile: server-product/docker/Dockerfile.server
+    container_name: tiation-onedev-server
+    restart: unless-stopped
+    ports:
+      - "6610:6610"  # HTTP port
+      - "6611:6611"  # SSH port
+    volumes:
+      - onedev_data:/opt/onedev
+      - onedev_logs:/opt/onedev/logs
+      - ./enterprise-config:/opt/onedev/conf/enterprise
+    environment:
+      - JAVA_OPTS=-Xmx4g -Dhibernate.connection.url=jdbc:postgresql://supabase-db:5432/onedev -Dhibernate.connection.username=${DB_USERNAME} -Dhibernate.connection.password=${DB_PASSWORD} -Dhibernate.connection.driver_class=org.postgresql.Driver -Dhibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+      - ONEDEV_SERVER_URL=https://${DOMAIN}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+    depends_on:
+      - supabase-db
+      - redis
+    networks:
+      - tiation-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6610/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  supabase-db:
+    image: postgres:15-alpine
+    container_name: tiation-supabase-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init-onedev-schema.sql:/docker-entrypoint-initdb.d/01-init-onedev-schema.sql
+    environment:
+      - POSTGRES_DB=onedev
+      - POSTGRES_USER=${DB_USERNAME}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    networks:
+      - tiation-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d onedev"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tiation-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    networks:
+      - tiation-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  nginx:
+    image: nginx:alpine
+    container_name: tiation-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/onedev.conf:/etc/nginx/conf.d/onedev.conf
+      - ./ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - onedev-server
+    networks:
+      - tiation-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ide-bridge:
+    build:
+      context: ./ide-bridge
+      dockerfile: Dockerfile
+    container_name: tiation-ide-bridge
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ONEDEV_URL=http://onedev-server:6610
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+    depends_on:
+      - onedev-server
+    networks:
+      - tiation-network
+
+  monitoring:
+    image: prom/prometheus:latest
+    container_name: tiation-monitoring
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    networks:
+      - tiation-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tiation-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    networks:
+      - tiation-network
+
+networks:
+  tiation-network:
+    driver: bridge
+    external: true
+
+volumes:
+  onedev_data:
+    driver: local
+  onedev_logs:
+    driver: local
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
